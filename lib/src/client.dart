@@ -341,6 +341,86 @@ class Client {
     return controller.stream;
   }
 
+  Future<List<dynamic>> call(
+      NodeId objectId, NodeId methodId, Iterable<dynamic> args,
+      [Iterable<TypeKindEnum>? argsKind]) async {
+    if (argsKind == null) {
+      throw UnimplementedError("Todo implement fetch of arg kinds");
+    }
+    if (args.length != argsKind.length) {
+      throw ArgumentError(
+          "Invalid supplied length of args: ${args.length} and type kind: ${argsKind.length}");
+    }
+    final len = args.length;
+    var output = calloc<raw.UA_Variant>(len);
+    var ptrs = <ffi.Pointer<raw.UA_Variant>>[];
+    final argsIter = args.iterator;
+    final kindsIter = argsKind.iterator;
+
+    for (var i = 0; i < len; i++) {
+      argsIter.moveNext();
+      kindsIter.moveNext();
+      final ptr = valueToVariant(argsIter.current, kindsIter.current, _lib);
+      ptrs.add(ptr);
+      output[i] = ptr.ref;
+    }
+    final completer = Completer<List<dynamic>>();
+    final callbackInner = ffi.NativeCallable<
+            ffi.Void Function(ffi.Pointer<raw.UA_Client>, ffi.Pointer<ffi.Void>,
+                ffi.Uint32, ffi.Pointer<raw.UA_CallResponse>)>.isolateLocal(
+        (ffi.Pointer<raw.UA_Client> client, ffi.Pointer<ffi.Void> userdata,
+            int requestId, ffi.Pointer<raw.UA_CallResponse> cr) {
+      try {
+        if (cr.ref.responseHeader.serviceResult == raw.UA_STATUSCODE_GOOD) {
+          if (cr.ref.results.ref.outputArgumentsSize == 0) {
+            completer.complete(
+                []); // the pointer to ua_variant is not null but not valid
+            // so we have this branch to handle the null case
+          } else if (cr.ref.results.ref.outputArgumentsSize == 1) {
+            completer.complete([
+              variantToValue(cr.ref.results.ref.outputArguments,
+                  structs: _knownStructures)
+            ]);
+          } else {
+            completer.completeError(
+                UnimplementedError("need variantToValue for ref of Variant"),
+                StackTrace.current);
+            // final result = <dynamic>[];
+            // for (var i = 0; i < cr.ref.results.ref.outputArgumentsSize; i++) {
+            //   result.add(variantToValue(cr.ref.results.ref.outputArguments[i],
+            //       structs: _knownStructures));
+            // }
+            // callback(result);
+          }
+        }
+      } catch (e) {
+        print("Error calling callback: $e");
+        completer.completeError(e, StackTrace.current);
+      } finally {
+        // cleanup input arguments
+        for (var ptr in ptrs) {
+          _lib.UA_Variant_delete(ptr);
+        }
+        // it doesnt like it when we delete the call response
+        // _lib.UA_CallResponse_delete(cr);
+      }
+    });
+
+    final statusCode = _lib.UA_Client_call_async(
+        _client,
+        objectId.toRaw(_lib),
+        methodId.toRaw(_lib),
+        len,
+        output,
+        callbackInner.nativeFunction,
+        ffi.nullptr, // todo set context?
+        ffi.nullptr);
+    if (statusCode != raw.UA_STATUSCODE_GOOD) {
+      throw 'Unable to call method: $statusCode ${statusCodeToString(statusCode)}';
+    }
+    return completer.future;
+  }
+
   // This is reading a DataTypeDefinition from namespace 0
   StructureSchema readDataTypeDefinition(
       raw.UA_NodeId nodeIdType, String fieldName) {
@@ -423,6 +503,9 @@ class Client {
 
   static dynamic variantToValue(ffi.Pointer<raw.UA_Variant> data,
       {KnownStructures? structs}) {
+    if (data == ffi.nullptr) {
+      return null;
+    }
     // Check if the variant contains no data
     if (data.ref.data == ffi.nullptr) {
       return null;
