@@ -188,11 +188,26 @@ class Client {
     return variant;
   }
 
-  Future<bool> asyncWriteValue(
-      NodeId nodeId, dynamic value, TypeKindEnum tKind) {
-    Completer<bool> future = Completer<bool>();
-    throw 'unimplemented';
-    return future.future;
+  Future<void> asyncWriteValue(NodeId nodeId, DynamicValue value) {
+    Completer<void> completer = Completer<void>();
+
+    // Create callback for this specific write request
+    final callback = ffi.NativeCallable<
+            ffi.Void Function(ffi.Pointer<raw.UA_Client>, ffi.Pointer<ffi.Void>,
+                ffi.Uint32, ffi.Pointer<raw.UA_WriteResponse>)>.isolateLocal(
+        (ffi.Pointer<raw.UA_Client> client, ffi.Pointer<ffi.Void> userdata,
+            int reqId, ffi.Pointer<raw.UA_WriteResponse> response) {
+      if (response.ref.responseHeader.serviceResult != raw.UA_STATUSCODE_GOOD) {
+        completer.completeError(
+            'Failed to write value: ${statusCodeToString(response.ref.responseHeader.serviceResult)}');
+        return;
+      }
+      completer.complete();
+    });
+    final variant = valueToVariant(value, _lib);
+    _lib.UA_Client_writeValueAttribute_async(_client, nodeId.toRaw(_lib),
+        variant, callback.nativeFunction, ffi.nullptr, ffi.nullptr);
+    return completer.future;
   }
 
   bool writeValue(NodeId nodeId, DynamicValue value) {
@@ -211,6 +226,32 @@ class Client {
     return retValue == raw.UA_STATUSCODE_GOOD;
   }
 
+  Future<DynamicValue> asyncReadValue(NodeId nodeId) {
+    Completer<DynamicValue> completer = Completer<DynamicValue>();
+
+    // Create callback for this specific read request
+    final callback = ffi.NativeCallable<
+            ffi.Void Function(
+                ffi.Pointer<raw.UA_Client>,
+                ffi.Pointer<ffi.Void>,
+                ffi.Uint32,
+                raw.UA_StatusCode,
+                ffi.Pointer<raw.UA_DataValue>)>.isolateLocal(
+        (ffi.Pointer<raw.UA_Client> client, ffi.Pointer<ffi.Void> userdata,
+            int reqId, int status, ffi.Pointer<raw.UA_DataValue> value) {
+      if (status != raw.UA_STATUSCODE_GOOD) {
+        completer.completeError(
+            'Failed to read value: ${statusCodeToString(status)}');
+        return;
+      }
+      final retVal = _variantToValueAutoSchema(value.ref.value);
+      completer.complete(retVal);
+    });
+    _lib.UA_Client_readValueAttribute_async(_client, nodeId.toRaw(_lib),
+        callback.nativeFunction, ffi.nullptr, ffi.nullptr);
+    return completer.future;
+  }
+
   dynamic readValue(NodeId nodeId) {
     ffi.Pointer<raw.UA_Variant> data = calloc<raw.UA_Variant>();
     int statusCode =
@@ -220,7 +261,7 @@ class Client {
       throw 'Bad status code $statusCode name: ${statusCodeName.cast<Utf8>().toDartString()}';
     }
 
-    final retVal = _variantToValueAutoSchema(data);
+    final retVal = _variantToValueAutoSchema(data.ref);
     calloc.free(data);
     return retVal;
   }
@@ -307,7 +348,7 @@ class Client {
       variantPointer.ref = value.ref.value;
       DynamicValue data = DynamicValue();
       try {
-        data = _variantToValueAutoSchema(variantPointer);
+        data = _variantToValueAutoSchema(variantPointer.ref);
       } catch (e) {
         stderr.write("Error converting data to type $DynamicValue: $e");
       } finally {
@@ -421,11 +462,11 @@ class Client {
     return map;
   }
 
-  DynamicValue _variantToValueAutoSchema(ffi.Pointer<raw.UA_Variant> data) {
+  DynamicValue _variantToValueAutoSchema(raw.UA_Variant data) {
     Schema defs = {};
-    if (data.ref.type.ref.typeId.toNodeId() == NodeId.structure) {
+    if (data.type.ref.typeId.toNodeId() == NodeId.structure) {
       // Cast the data to extension object
-      final ext = data.ref.data.cast<raw.UA_ExtensionObject>();
+      final ext = data.data.cast<raw.UA_ExtensionObject>();
       final typeId = ext.ref.content.encoded.typeId.toNodeId();
       defs = readDataTypeDefinition(typeId);
       for (var def in defs.keys) {
@@ -440,15 +481,14 @@ class Client {
     return retValue;
   }
 
-  static DynamicValue variantToValue(ffi.Pointer<raw.UA_Variant> data,
-      {Schema? defs}) {
+  static DynamicValue variantToValue(raw.UA_Variant data, {Schema? defs}) {
     // Check if the variant contains no data
-    if (data.ref.data == ffi.nullptr) {
+    if (data.data == ffi.nullptr) {
       return DynamicValue();
     }
 
-    final typeId = data.ref.type.ref.typeId;
-    final ref = data.ref;
+    final typeId = data.type.ref.typeId;
+    final ref = data;
 
     final dimensions = ref.dimensions;
     final dimensionsMultiplied = dimensions.fold(1, (a, b) => a * b);
@@ -505,7 +545,7 @@ class Client {
 
       retValue = createNestedArray(dimensions.toList());
       final reader = binarize.ByteReader(
-          data.ref.data.cast<ffi.Uint8>().asTypedList(bufferLength));
+          data.data.cast<ffi.Uint8>().asTypedList(bufferLength));
       retValue.get(reader, Endian.little, false, true);
     }
 
