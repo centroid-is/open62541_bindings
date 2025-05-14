@@ -2,11 +2,11 @@ import 'dart:collection' show LinkedHashMap;
 import 'dart:ffi' as ffi;
 import 'package:ffi/ffi.dart';
 import 'package:binarize/binarize.dart';
+import 'package:open62541/open62541.dart';
 import 'package:open62541/src/extensions.dart';
 import 'package:open62541/src/generated/open62541_bindings.dart' as raw;
 import 'package:open62541/src/types/payloads.dart';
 import 'types/create_type.dart';
-import 'node_id.dart';
 
 enum DynamicType { object, array, string, boolean, nullValue, unknown, integer, double }
 
@@ -24,6 +24,17 @@ class LocalizedText {
     if (value.isNotEmpty && locale.isNotEmpty) return "$locale : $value";
     return value;
   }
+
+  @override
+  bool operator ==(Object other) {
+    if (other is LocalizedText) {
+      return value == other.value && locale == other.locale;
+    }
+    return false;
+  }
+
+  @override
+  int get hashCode => value.hashCode ^ locale.hashCode;
 }
 
 class EnumField {
@@ -38,16 +49,44 @@ class EnumField {
   }
 }
 
+class AttributeContainer<T> {
+  final T? value;
+  final int opcUaStatus;
+  final String errorMessage;
+
+  bool get hasError => opcUaStatus != UA_STATUSCODE_GOOD;
+
+  const AttributeContainer({this.value, this.opcUaStatus = UA_STATUSCODE_GOOD, this.errorMessage = ''});
+}
+
 typedef Schema = Map<NodeId, DynamicValue>;
 
 class DynamicValue extends PayloadType<DynamicValue> {
   dynamic value;
   NodeId? typeId;
   String? name;
-  LocalizedText? description;
+  AttributeContainer<LocalizedText?> _description;
   LocalizedText? displayName;
   Map<int, EnumField>? enumFields;
   bool isOptional = false;
+
+  // ignore: unnecessary_getters_setters
+  AttributeContainer<LocalizedText?> get attributeDescription => _description;
+
+  set attributeDescription(AttributeContainer<LocalizedText?> value) {
+    _description = value;
+  }
+
+  LocalizedText? get description {
+    if (_description.hasError) {
+      throw _description.errorMessage;
+    }
+    return _description.value;
+  }
+
+  set description(LocalizedText? value) {
+    _description = AttributeContainer(value: value);
+  }
 
   factory DynamicValue.fromMap(LinkedHashMap<String, dynamic> entries) {
     DynamicValue v = DynamicValue();
@@ -97,7 +136,8 @@ class DynamicValue extends PayloadType<DynamicValue> {
     v.isOptional = other.isOptional;
     return v;
   }
-  DynamicValue({this.value, this.description, this.typeId, this.displayName});
+  DynamicValue({this.value, LocalizedText? description, this.typeId, this.displayName, this.name})
+      : _description = AttributeContainer(value: description);
 
   DynamicType get type {
     if (value == null) return DynamicType.nullValue;
